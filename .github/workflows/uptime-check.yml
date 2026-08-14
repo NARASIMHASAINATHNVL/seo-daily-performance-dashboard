@@ -1,0 +1,116 @@
+name: BankBazaar Uptime Check
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check bankbazaar.com and update log
+        id: check
+        run: |
+          set +e
+          START=$(date +%s%3N)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 15 --user-agent "BankBazaar-Uptime-Checker-GHA/1.0" https://www.bankbazaar.com/)
+          CURL_EXIT=$?
+          END=$(date +%s%3N)
+          RESP_MS=$((END - START))
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            OK=false
+            REASON="Connection error (curl exit code $CURL_EXIT)"
+            HTTP_CODE_JSON=null
+          elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 400 ]; then
+            OK=false
+            REASON="HTTP $HTTP_CODE"
+            HTTP_CODE_JSON=$HTTP_CODE
+          else
+            OK=true
+            REASON=""
+            HTTP_CODE_JSON=$HTTP_CODE
+          fi
+
+          echo "status=$([ "$OK" = true ] && echo up || echo down)" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+
+          python3 - "$OK" "$HTTP_CODE_JSON" "$RESP_MS" "$TIMESTAMP" "$REASON" <<'PYEOF'
+          import json, sys, os
+          ok, http_code, resp_ms, ts, reason = sys.argv[1:6]
+          path = "uptime-log.json"
+          if os.path.exists(path):
+              with open(path) as f:
+                  data = json.load(f)
+          else:
+              data = {"checks": [], "lastUpdated": None}
+          entry = {
+              "url": "https://www.bankbazaar.com/",
+              "timestamp": ts,
+              "ok": ok == "true",
+              "httpStatus": None if http_code == "null" else int(http_code),
+              "responseMs": int(resp_ms),
+              "error": reason if reason else None,
+          }
+          data["checks"].append(entry)
+          data["checks"] = data["checks"][-1000:]
+          data["lastUpdated"] = ts
+          with open(path, "w") as f:
+              json.dump(data, f, indent=2)
+          PYEOF
+
+      - name: Commit updated log
+        run: |
+          git config user.name "bankbazaar-uptime-bot"
+          git config user.email "actions@github.com"
+          git add uptime-log.json
+          git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update uptime log"
+          git push
+
+      - name: Alert Teams if down
+        if: steps.check.outputs.status == 'down'
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          REASON: ${{ steps.check.outputs.reason }}
+        run: |
+          if [ -z "$TEAMS_WEBHOOK_URL" ]; then
+            echo "No TEAMS_WEBHOOK_URL secret configured - skipping alert. Add it in repo Settings > Secrets and variables > Actions."
+            exit 0
+          fi
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          PAYLOAD=$(cat <<JSON
+          {
+            "type": "message",
+            "attachments": [
+              {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "type": "AdaptiveCard",
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "Container",
+                      "style": "attention",
+                      "bleed": true,
+                      "items": [
+                        { "type": "TextBlock", "text": "BankBazaar.com appears to be DOWN", "weight": "Bolder", "size": "Medium", "wrap": true },
+                        { "type": "TextBlock", "text": "$REASON - checked $TIMESTAMP (via GitHub Actions)", "wrap": true, "isSubtle": true }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+          JSON
+          )
+          curl -s -o /dev/null -w "Webhook POST status: %{http_code}\n" -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
