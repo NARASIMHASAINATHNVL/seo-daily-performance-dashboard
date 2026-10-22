@@ -6327,7 +6327,15 @@
       "httpStatus": 200,
       "responseMs": 163,
       "error": null
+    },
+    {
+      "url": "https://www.bankbazaar.com/",
+      "timestamp": "2026-10-22T16:04:15+00:00",
+      "ok": true,
+      "httpStatus": 200,
+      "responseMs": 204,
+      "error": null
     }
   ],
-  "lastUpdated": "2026-10-22T11:41:48+00:00"
+  "lastUpdated": "2026-10-22T16:04:15+00:00"
 }
